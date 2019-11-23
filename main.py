@@ -1,4 +1,5 @@
-import json, os, logging
+import json, os, logging, gzip, hashlib, shutil
+from zipfile import ZipFile, BadZipFile
 import multiprocessing
 from multiprocessing import Pool
 import requests
@@ -11,14 +12,15 @@ def cached(fn, cache_path, force = False):
 		json.dump(result, open(cache_path, "w"))
 		return result
 
-def retry(fn, tries):
+def retry(fn, tries, verbose=True):
 	for i in range(tries):
 		try:
 			result = (fn)()
-			if i > 0: print(f"Success after {i} attempt{'s' if i > 1 else ''}!")
+			if i > 0 and verbose: print(f"Success after {i} attempt{'s' if i > 1 else ''}!")
 			return result
 		except Exception:
-			LOGGER.exception("Caught exception (retrying):")
+			if verbose:
+				LOGGER.exception("Caught exception (retrying):")
 	
 	raise Exception(f"Couldn't download after {tries} tries!")
 
@@ -142,19 +144,56 @@ def get_chart_list(mode, status):
 	return song_list
 
 def urlretrieve_retry(url, output_path):
-	from urllib.request import urlretrieve
-	import shutil
-	
 	def try_download():
-		with requests.get(url, stream=True, timeout=10) as r:
+		with requests.get(url, stream=True, timeout=2) as r:
 			with open(output_path, 'wb') as f:
 				shutil.copyfileobj(r.raw, f)
-	retry(try_download, 7)
+	try:
+		retry(try_download, 20, verbose=False)
+	except Exception as e:
+		if os.path.exists(output_path):
+			print("Deleting incomplete download")
+			os.remove(output_path)
+		raise e from None
+
+def try_unzip(zip_path):
+	try:
+		with ZipFile(zip_path, "r") as zip_obj:
+			zip_obj.extractall(os.path.dirname(zip_path))
+		os.remove(zip_path)
+		return True
+	except BadZipFile:
+		return False
+
+def try_ungzip(src, dst):
+	try:
+		with gzip.open(src, 'rb') as f_in:
+			with open(dst, 'wb') as f_out:
+				shutil.copyfileobj(f_in, f_out)
+		os.remove(src)
+		return True
+	except OSError:
+		return False
+
+def download_maybe_compressed(url, output_path):
+	target_dir = os.path.dirname(output_path)
+	compressed = os.path.join(target_dir, "tempfile")
+	
+	urlretrieve_retry(url, compressed)
+	
+	# If extension is .mc (probably stands for Malody Compressed), the
+	# file MIGHT be a zip that needs to be extracted first
+	if output_path.endswith(".mc"):
+		if try_unzip(compressed): return
+	
+	if try_ungzip(compressed, output_path): return
+	
+	# This happens when it was uncompressed
+	os.rename(compressed, output_path)
+
+def md5(path): return hashlib.md5(open(path, "rb").read()).hexdigest()
 
 def download_chart(info):
-	from zipfile import ZipFile
-	import hashlib
-	
 	sid = info["data"]["sid"]
 	uid = info["data"]["uid"]
 	
@@ -162,45 +201,32 @@ def download_chart(info):
 		fileid = file_data["file"]
 		filename = file_data["name"]
 		
-		target_directory = f"output/_song_{sid}/{uid}"
-		output_path = f"{target_directory}/{filename}"
+		target_dir = f"output/_song_{sid}/{uid}"
+		output_path = os.path.join(target_dir, filename)
 		
 		# Check if file already exists via hash comparison
 		if os.path.exists(output_path):
 			supposed_md5 = file_data["hash"]
-			md5 = hashlib.md5(open(output_path, "rb").read()).hexdigest()
-			if md5 == supposed_md5:
+			if md5(output_path) == supposed_md5:
 				print(f"Skipping {filename} (already downloaded)")
 				continue
 			else:
-				print(f"{filename} doesn't match website hash. Re-downloading.")
+				temp_path = os.path.join(target_dir, "temp")
+				os.rename(output_path, temp_path)
+				if try_ungzip(temp_path, output_path) and \
+						md5(output_path) == supposed_md5:
+					print(f"Existing {filename} was automatically detected and compressed as GZip")
+					continue
+				else:
+					print(f"{filename} doesn't match website hash. Re-downloading")
 		
 		url = f"http://chart.mcbaka.com/{sid}/{uid}/{fileid}"
-		os.makedirs(target_directory, exist_ok=True)
+		os.makedirs(target_dir, exist_ok=True)
 		
-		zip_parse_failed = False
-		
-		# If extension is .mc (probably stands for Malody
-		# Compressed), the file MIGHT be a zip that needs to be
-		# extracted first. Sometimes it's not though
-		if output_path.endswith(".mc"):
-			try:
-				zip_path = f"{target_directory}/temp.zip"
-				urlretrieve_retry(url, zip_path)
-				
-				with ZipFile(zip_path, "r") as zip_obj:
-					zip_obj.extractall(target_directory)
-				
-				os.remove(zip_path)
-			except Exception:
-				# Then the file was apparently not a zip
-				zip_parse_failed = True
-		
-		if not output_path.endswith(".mc") or zip_parse_failed:
-			urlretrieve_retry(url, output_path)
+		download_maybe_compressed(url, output_path)
 
-def download_everything(session, chart_list, cid_filter=None):
-	pool = Pool(API_THREADS)
+def download_everything(session, chart_list, cid_filter=None, start=0):
+	pool = Pool(2)
 	
 	if cid_filter:
 		chart_list = [c for c in chart_list if c["id"] in cid_filter]
@@ -213,8 +239,11 @@ def download_everything(session, chart_list, cid_filter=None):
 	else:
 		faulty_cids = []
 	
-	cids = map(lambda chart: chart["id"], chart_list)
-	for i, info in enumerate(pool.imap(session.get_chart_download, cids)):
+	cids = map(lambda chart: chart["id"], chart_list[start:])
+	i = start - 1
+	for info in pool.imap(session.get_chart_download, cids):
+		i += 1
+		
 		chart = chart_list[i]
 		cid = chart["id"]
 		print()
@@ -227,6 +256,7 @@ def download_everything(session, chart_list, cid_filter=None):
 				continue
 			except Exception:
 				LOGGER.exception("Something went wrong. Please report this")
+				raise # REMEMBER
 		else:
 			print(f"[{i+1}/{num_charts}] Skipping CID={cid} {chart['title']} | {chart['version']} | Error code {info['code']}")
 		
@@ -250,7 +280,7 @@ def chooser(question, options):
 			pass
 		query = f"Enter a valid number between 1 and {len(options)}: "
 
-if __name__ == "__main__":
+def main():
 	global API_THREADS, LOGGER
 	
 	multiprocessing.freeze_support()
@@ -258,7 +288,12 @@ if __name__ == "__main__":
 	API_THREADS = 50
 	GAMEMODES = ["Key", "Catch", "Pad", "Taiko", "Ring", "Slide"]
 	STABILITIES = ["Alpha", "Beta", "Stable"]
-	LOGGER = logging.getLogger()
+	
+	# REMEMBER
+	session = AndroidSession.login("scraper-bot", "53a1dbcbaa38fce050b8f90263b28631")
+	charts = cached(lambda: get_chart_list(0, 0), "chartlist.json", force=False)
+	download_everything(session, charts, start=7000)
+	exit()
 	
 	gamemode = chooser("Which game mode do you want to download?", [
 		"All of them", *GAMEMODES
@@ -270,6 +305,13 @@ if __name__ == "__main__":
 		"Download all charts",
 		"Download only those charts that failed in the last run"
 	])
+	if mode == 0:
+		print()
+		txt = input("Enter an index to start from (0 to start from the beginning, as usual): ")
+		try:
+			start = int(txt)
+		except ValueError:
+			start = 0
 	print()
 	
 	print("Logging in...")
@@ -286,7 +328,7 @@ if __name__ == "__main__":
 	
 	if mode == 0:
 		print("Downloading the main files...")
-		download_everything(session, charts)
+		download_everything(session, charts, start=start)
 	elif mode == 1:
 		with open("faulty-charts.json", "r") as f:
 			faulty_cids = json.load(f)
@@ -295,3 +337,14 @@ if __name__ == "__main__":
 
 	print()
 	input("Script finished. Press enter to quit")
+
+if __name__ == "__main__":
+	global LOGGER
+	LOGGER = logging.getLogger()
+	
+	try:
+		main()
+	except:
+		LOGGER.exception("Error in main!")
+		print()
+		input("Press enter to quit/close")
