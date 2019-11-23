@@ -11,6 +11,17 @@ def cached(fn, cache_path, force = False):
 		json.dump(result, open(cache_path, "w"))
 		return result
 
+def retry(fn, tries):
+	for i in range(tries):
+		try:
+			result = (fn)()
+			if i > 0: print(f"Success after {i} attempt{'s' if i > 1 else ''}!")
+			return result
+		except Exception:
+			LOGGER.exception("Caught exception (retrying):")
+	
+	raise Exception(f"Couldn't download after {tries} tries!")
+
 class AndroidSession:
 	uid = None
 	key = None
@@ -62,7 +73,6 @@ class AndroidSession:
 		}
 		
 		results = self.get("list", params).json()
-		print(results)
 		return results["data"][0]
 	
 	def get_chart_download(self, cid):
@@ -71,17 +81,18 @@ class AndroidSession:
 			"cid": cid,
 		}
 		
-		return self.get("chart/download", params).json()
+		return retry(lambda: self.get("chart/download", params).json(), 5)
 
 # Meant for usage inside get_song_list(). This is a top-level function
 # because Python multiprocessing would complain otherwise
 def dl_chart_list_page(i):
+	global _mode, _status
 	url = "http://m.mugzone.net/page/chart/filter"
 	params = {
 		# Song status. 0 = Alpha, 1 = Beta, 2 = Stable, 3 = All of them
-		"status": 3,
+		"status": _status,
 		# Play mode. -1 = All, 0/3/4/5/6/7 = The individual game modes
-		"mode": -1,
+		"mode": _mode,
 		# Number of results to request. The server has only a few valid
 		# choices for this param, among of them 10, 18, 30. 10 seems to
 		# be the fallback value.
@@ -92,16 +103,25 @@ def dl_chart_list_page(i):
 	
 	return requests.get(url, timeout=10, params=params).json()
 
-def get_chart_list():
+def get_chart_list(mode, status):
+	global _mode, _status
+	if mode == 0: mode = -1
+	elif mode == 1: mode = 0
+	elif mode >= 2: mode += 1
+	_mode = mode
+	if status == 0: status = 3
+	else: status -= 1
+	_status = status
+	
 	print("Initializing chart list download...")
 	pool = Pool(API_THREADS)
 	
 	url = "http://m.mugzone.net/page/chart/filter"
 	params = {
 		# Song status. 0 = Alpha, 1 = Beta, 2 = Stable, 3 = All of them
-		"status": 3,
+		"status": status,
 		# Play mode. -1 = All, 0/3/4/5/6/7 = The individual game modes
-		"mode": -1,
+		"mode": mode,
 		# Number of results to request. The server has only a few valid
 		# choices for this param, among of them 10, 18, 30. 10 seems to
 		# be the fallback value.
@@ -121,28 +141,15 @@ def get_chart_list():
 	
 	return song_list
 
-def urlretrieve_retry(url, output_path, retries=7):
+def urlretrieve_retry(url, output_path):
 	from urllib.request import urlretrieve
 	import shutil
 	
-	for i in range(retries):
-		try:
-			# ~ stream = requests.get(url, stream=True)
-			# ~ with open(output_path, "wb") as handle:
-				# ~ for data in stream.iter_content(): handle.write(data)
-			
-			with requests.get(url, stream=True, timeout=10) as r:
-				with open(output_path, 'wb') as f:
-					shutil.copyfileobj(r.raw, f)
-			
-			urlretrieve(url, output_path)
-			
-			if i > 0: print(f"Success after {i} attempt{'s' if i > 1 else ''}!")
-			return
-		except Exception:
-			LOGGER.exception("Network error. Retrying...")
-	
-	raise Exception(f"Couldn't download after {retries} tries!")
+	def try_download():
+		with requests.get(url, stream=True, timeout=10) as r:
+			with open(output_path, 'wb') as f:
+				shutil.copyfileobj(r.raw, f)
+	retry(try_download, 7)
 
 def download_chart(info):
 	from zipfile import ZipFile
@@ -162,11 +169,11 @@ def download_chart(info):
 		if os.path.exists(output_path):
 			supposed_md5 = file_data["hash"]
 			md5 = hashlib.md5(open(output_path, "rb").read()).hexdigest()
-			if md5 == supposed_md5 or filename.endswith(".mc"):
+			if md5 == supposed_md5:
 				print(f"Skipping {filename} (already downloaded)")
 				continue
 			else:
-				print(f"{filename} file exists, but is corrupted. Re-downloading.")
+				print(f"{filename} doesn't match website hash. Re-downloading.")
 		
 		url = f"http://chart.mcbaka.com/{sid}/{uid}/{fileid}"
 		os.makedirs(target_directory, exist_ok=True)
@@ -249,15 +256,34 @@ if __name__ == "__main__":
 	multiprocessing.freeze_support()
 	
 	API_THREADS = 50
+	GAMEMODES = ["Key", "Catch", "Pad", "Taiko", "Ring", "Slide"]
+	STABILITIES = ["Alpha", "Beta", "Stable"]
 	LOGGER = logging.getLogger()
-
+	
+	gamemode = chooser("Which game mode do you want to download?", [
+		"All of them", *GAMEMODES
+	])
+	stability = chooser("Which stability status do you want to download?", [
+		"All of them", *STABILITIES
+	])
+	mode = chooser("Which download mode?", [
+		"Download all charts",
+		"Download only those charts that failed in the last run"
+	])
+	print()
+	
 	print("Logging in...")
 	session = AndroidSession.login("scraper-bot", "53a1dbcbaa38fce050b8f90263b28631")
 
-	print("Fetching chart list...")
-	charts = cached(get_chart_list, "chartlist.json", force=False)
+	chartlist_file = "chartlist"
+	if gamemode != 0 or stability != 0:
+		chartlist_file += f"-{GAMEMODES[gamemode]}-{STABILITIES[stability]}"
+	chartlist_file += ".json"
 	
-	mode = chooser("Which download mode?", ["Download all charts", "Download only those charts that failed in the last run"])
+	print("Fetching chart list...")
+	fn = lambda: get_chart_list(gamemode, stability)
+	charts = cached(fn, chartlist_file, force=False)
+	
 	if mode == 0:
 		print("Downloading the main files...")
 		download_everything(session, charts)
