@@ -1,28 +1,9 @@
-import json, os, logging, gzip, hashlib, shutil
-from zipfile import ZipFile, BadZipFile
-import multiprocessing
+import json, os, logging, multiprocessing
 from multiprocessing import Pool
 import requests
 
-def cached(fn, cache_path, force = False):
-	if os.path.exists(cache_path) and not force:
-		return json.load(open(cache_path))
-	else:
-		result = (fn)()
-		json.dump(result, open(cache_path, "w"))
-		return result
-
-def retry(fn, tries, verbose=True):
-	for i in range(tries):
-		try:
-			result = (fn)()
-			if i > 0 and verbose: print(f"Success after {i} attempt{'s' if i > 1 else ''}!")
-			return result
-		except Exception:
-			if verbose:
-				LOGGER.exception("Caught exception (retrying):")
-	
-	raise Exception(f"Couldn't download after {tries} tries!")
+import scraping
+from util import *
 
 class AndroidSession:
 	uid = None
@@ -143,145 +124,22 @@ def get_chart_list(mode, status):
 	
 	return song_list
 
-def urlretrieve_retry(url, output_path):
-	def try_download():
-		with requests.get(url, stream=True, timeout=2) as r:
-			with open(output_path, 'wb') as f:
-				shutil.copyfileobj(r.raw, f)
-	try:
-		retry(try_download, 20, verbose=False)
-	except Exception as e:
-		if os.path.exists(output_path):
-			print("Deleting incomplete download")
-			os.remove(output_path)
-		raise e from None
+"""
+Account 1:
+Name=scraper-bot
+E-Mail=kangalioo654@gmail.com
+Pass=scraper-bot
+Hash=53a1dbcbaa38fce050b8f90263b28631
 
-def try_unzip(zip_path):
-	try:
-		with ZipFile(zip_path, "r") as zip_obj:
-			zip_obj.extractall(os.path.dirname(zip_path))
-		os.remove(zip_path)
-		return True
-	except BadZipFile:
-		return False
-
-def try_ungzip(src, dst):
-	try:
-		with gzip.open(src, 'rb') as f_in:
-			with open(dst, 'wb') as f_out:
-				shutil.copyfileobj(f_in, f_out)
-		os.remove(src)
-		return True
-	except OSError:
-		return False
-
-def download_maybe_compressed(url, output_path):
-	target_dir = os.path.dirname(output_path)
-	compressed = os.path.join(target_dir, "tempfile")
-	
-	urlretrieve_retry(url, compressed)
-	
-	# If extension is .mc (probably stands for Malody Compressed), the
-	# file MIGHT be a zip that needs to be extracted first
-	if output_path.endswith(".mc"):
-		if try_unzip(compressed): return
-	
-	if try_ungzip(compressed, output_path): return
-	
-	# This happens when it was uncompressed
-	os.rename(compressed, output_path)
-
-def md5(path): return hashlib.md5(open(path, "rb").read()).hexdigest()
-
-def download_chart(info):
-	sid = info["data"]["sid"]
-	uid = info["data"]["uid"]
-	
-	for file_data in info["data"]["list"]:
-		fileid = file_data["file"]
-		filename = file_data["name"]
-		
-		target_dir = f"output/_song_{sid}/{uid}"
-		output_path = os.path.join(target_dir, filename)
-		
-		# Check if file already exists via hash comparison
-		if os.path.exists(output_path):
-			supposed_md5 = file_data["hash"]
-			if md5(output_path) == supposed_md5:
-				print(f"Skipping {filename} (already downloaded)")
-				continue
-			else:
-				temp_path = os.path.join(target_dir, "temp")
-				os.rename(output_path, temp_path)
-				if try_ungzip(temp_path, output_path) and \
-						md5(output_path) == supposed_md5:
-					print(f"Existing {filename} was automatically detected and compressed as GZip")
-					continue
-				else:
-					print(f"{filename} doesn't match website hash. Re-downloading")
-		
-		url = f"http://chart.mcbaka.com/{sid}/{uid}/{fileid}"
-		os.makedirs(target_dir, exist_ok=True)
-		
-		download_maybe_compressed(url, output_path)
-
-def download_everything(session, chart_list, cid_filter=None, start=0):
-	pool = Pool(2)
-	
-	if cid_filter:
-		chart_list = [c for c in chart_list if c["id"] in cid_filter]
-	
-	num_charts = len(chart_list)
-	
-	if os.path.exists("faulty-charts.json"):
-		with open("faulty-charts.json", "r") as f:
-			faulty_cids = json.load(f)
-	else:
-		faulty_cids = []
-	
-	cids = map(lambda chart: chart["id"], chart_list[start:])
-	i = start - 1
-	for info in pool.imap(session.get_chart_download, cids):
-		i += 1
-		
-		chart = chart_list[i]
-		cid = chart["id"]
-		print()
-		if int(info["code"]) >= 0:
-			print(f"[{i+1}/{num_charts}] Downloading CID={cid} {chart['title']} | {chart['version']}")
-		
-			try:
-				download_chart(info)
-				if cid in faulty_cids: faulty_cids.remove(cid)
-				continue
-			except Exception:
-				LOGGER.exception("Something went wrong. Please report this")
-				raise # REMEMBER
-		else:
-			print(f"[{i+1}/{num_charts}] Skipping CID={cid} {chart['title']} | {chart['version']} | Error code {info['code']}")
-		
-		# Code only gets to this point if something went wrong
-		if cid not in faulty_cids: faulty_cids.append(cid)
-		with open("faulty-charts.json", "w") as f:
-			json.dump(faulty_cids, f, indent=4)
-
-def chooser(question, options):
-	print(question)
-	for i, option in enumerate(options):
-		print(f" {i+1}) {option}")
-	
-	query = "Enter the number of your answer: "
-	while True:
-		try:
-			answer = int(input(query)) - 1
-			if answer >= 0 and answer < len(options):
-				return answer
-		except ValueError:
-			pass
-		query = f"Enter a valid number between 1 and {len(options)}: "
+Account 2:
+Name=codswallopgam
+E-Mail=d1655996@urhen.com
+Pass=codswallopgam
+Hash=
+"""
 
 def main():
-	global API_THREADS, LOGGER
+	global API_THREADS, logger
 	
 	multiprocessing.freeze_support()
 	
@@ -290,9 +148,10 @@ def main():
 	STABILITIES = ["Alpha", "Beta", "Stable"]
 	
 	# REMEMBER
-	session = AndroidSession.login("scraper-bot", "53a1dbcbaa38fce050b8f90263b28631")
+	#session = AndroidSession.login("scraper-bot", "53a1dbcbaa38fce050b8f90263b28631")
+	session = AndroidSession("259089", "1868dd6ea073c6501f183b5ea05a48b3")
 	charts = cached(lambda: get_chart_list(0, 0), "chartlist.json", force=False)
-	download_everything(session, charts, start=7000)
+	scraping.download_everything(session, charts, start=724-1)
 	exit()
 	
 	gamemode = chooser("Which game mode do you want to download?", [
@@ -307,9 +166,9 @@ def main():
 	])
 	if mode == 0:
 		print()
-		txt = input("Enter an index to start from (0 to start from the beginning, as usual): ")
+		txt = input("Enter an index to start from (1 to start from the beginning, as usual): ")
 		try:
-			start = int(txt)
+			start = int(txt) - 1
 		except ValueError:
 			start = 0
 	print()
@@ -333,18 +192,18 @@ def main():
 		with open("faulty-charts.json", "r") as f:
 			faulty_cids = json.load(f)
 			print(f"Redownloading faulty charts...")
-			download_everything(session, charts, faulty_cids)
+			scraping.download_everything(session, charts, faulty_cids)
 
 	print()
 	input("Script finished. Press enter to quit")
 
 if __name__ == "__main__":
-	global LOGGER
-	LOGGER = logging.getLogger()
+	global logger
+	logger = logging.getLogger()
 	
 	try:
 		main()
 	except:
-		LOGGER.exception("Error in main!")
+		logger.exception("Error in main!")
 		print()
 		input("Press enter to quit/close")
