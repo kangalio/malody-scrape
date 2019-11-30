@@ -3,7 +3,8 @@ import os, json, logging
 logger = logging.getLogger()
 
 class Panic(Exception):
-	pass
+	def __init__(self, text):
+		super().__init__(f"\x1B[1;31m{text}\x1B[0m")
 
 def cached(fn, cache_path, force = False):
 	if os.path.exists(cache_path) and not force:
@@ -24,7 +25,7 @@ def retry(fn, tries, verbose=True):
 		except Exception as e:
 			last_exception = e
 	
-	raise Panic(f"All {tries} attempts failed") from last_exception
+	raise Panic(f"[All {tries} attempts failed] {str(last_exception)}")
 
 def chooser(question, options):
 	print(question)

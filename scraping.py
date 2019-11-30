@@ -4,6 +4,8 @@ from multiprocessing import Pool
 import requests
 from util import *
 
+USE_POOL = False
+
 def download(url, output_path):
 	def try_download():
 		# ~ from urllib.request import urlretrieve
@@ -15,6 +17,8 @@ def download(url, output_path):
 				# ~ for chunk in r.iter_content():
 					# ~ f.write(chunk)
 		with requests.get(url, timeout=2) as r:
+			if r.status_code == 404:
+				raise Panic(f"404: {url}")
 			with open(output_path, 'wb') as f:
 				f.write(r.content)
 	
@@ -25,75 +29,6 @@ def download(url, output_path):
 			print("Deleting incomplete download")
 			os.remove(output_path)
 		raise Panic(url) from e
-
-"""def try_unzip(zip_path):
-	try:
-		with ZipFile(zip_path, "r") as zip_obj:
-			zip_obj.extractall(os.path.dirname(zip_path))
-		os.remove(zip_path)
-		return True
-	except BadZipFile:
-		return False
-
-def try_ungzip(src, dst):
-	try:
-		with gzip.open(src, 'rb') as f_in:
-			with open(dst, 'wb') as f_out:
-				shutil.copyfileobj(f_in, f_out)
-		os.remove(src)
-		return True
-	except OSError:
-		return False
-
-def download_maybe_compressed(url, output_path):
-	target_dir = os.path.dirname(output_path)
-	compressed = os.path.join(target_dir, "tempfile")
-	
-	urlretrieve_retry(url, compressed)
-	
-	# If extension is .mc (probably stands for Malody Compressed), the
-	# file MIGHT be a zip that needs to be extracted first
-	if output_path.endswith(".mc"):
-		if try_unzip(compressed): return
-	
-	if try_ungzip(compressed, output_path): return
-	
-	# This happens when it was uncompressed
-	os.rename(compressed, output_path)
-
-def md5(path): return hashlib.md5(open(path, "rb").read()).hexdigest()
-
-def download_chart(info):
-	sid = info["data"]["sid"]
-	uid = info["data"]["uid"]
-	
-	for file_data in info["data"]["list"]:
-		fileid = file_data["file"]
-		filename = file_data["name"]
-		
-		target_dir = f"output/_song_{sid}/{uid}"
-		output_path = os.path.join(target_dir, filename)
-		
-		# Check if file already exists via hash comparison
-		if os.path.exists(output_path):
-			supposed_md5 = file_data["hash"]
-			if md5(output_path) == supposed_md5:
-				print(f"Skipping {filename} (already downloaded)")
-				continue
-			else:
-				temp_path = os.path.join(target_dir, "temp")
-				os.rename(output_path, temp_path)
-				if try_ungzip(temp_path, output_path) and \
-						md5(output_path) == supposed_md5:
-					print(f"Existing {filename} was automatically detected and compressed as GZip")
-					continue
-				else:
-					print(f"{filename} doesn't match website hash. Re-downloading")
-		
-		url = f"http://chart.mcbaka.com/{sid}/{uid}/{fileid}"
-		os.makedirs(target_dir, exist_ok=True)
-		
-		download_maybe_compressed(url, output_path)"""
 
 # Returns if the path matches the given md5 hash
 def hash_match(path, md5):
@@ -149,7 +84,7 @@ def try_to_match_hash(output_path, temp_path, md5):
 	
 	return False
 
-def download_file(info, target_dir, dsid):
+def download_file(info, target_dir, sid, dsid):
 	# Path to place the final file in
 	output_path = os.path.join(target_dir, info["name"])
 	# Construct a temporary file path to use
@@ -164,16 +99,27 @@ def download_file(info, target_dir, dsid):
 			return True
 		# The file doesn't match in any way, so redownload it is
 	
-	# Construct URL to download the file from
-	# ~ url = f"http://chart.malody.cn/{dsid}/{info['uid']}/{info['file']}"
-	url = f"http://chart.malody.cn/{dsid}/0/{info['file']}"
 	# Download the file
+	url = f"http://chart.malody.cn/{dsid}/0/{info['file']}"
 	print(f"Downloading {info['name']}...")
-	download(url, output_path)
+	try:
+		download(url, output_path)
+	except Panic as e:
+		if int(dsid) == 0:
+			# Sometimes download breaks with dsid=0. Maybe, just maybe,
+			# in those cases the normal sid might work?
+			url = f"http://chart.malody.cn/{sid}/0/{info['file']}"
+			download(url, output_path)
+		else:
+			raise e
 	
 	if try_to_match_hash(output_path, temp_path, info["hash"]):
 		return True
 	
+	# For the case that the downloaded file actually was correct and
+	# the server hash was wrong, put the tempfile into the correct
+	# location so it can still function.
+	os.rename(temp_path, output_path)
 	raise Panic(f"{output_path} can't be hash-matched: {url}")
 
 # IMPORTANT!!!!!!!
@@ -186,15 +132,20 @@ def download_chart(info):
 	
 	for fileinfo in info["list"]:
 		try:
-			download = lambda: download_file(fileinfo, target_dir, info["dsid"])
+			download = lambda: download_file(fileinfo, target_dir, info["sid"], info["dsid"])
 			# Sometimes the download corrupts I think and the hash
 			# doesn't match. Just try again for that case
 			retry(download, 3, verbose=True)
 		except Panic as e:
-			print(f"Panic: {e}")
+			print(f"Panic in {target_dir}: {e}")
 	
 
 def download_everything(session, chart_list, cid_filter=None, start=0):
+	if USE_POOL:
+		print("Creating pool..")
+		pool = Pool(50)
+		print("Done creating pool")
+	
 	if cid_filter:
 		chart_list = [c for c in chart_list if c["id"] in cid_filter]
 	
@@ -207,10 +158,17 @@ def download_everything(session, chart_list, cid_filter=None, start=0):
 		faulty_cids = []
 	
 	cids = map(lambda chart: chart["id"], chart_list[start:])
+	
+	if USE_POOL:
+		info_iterator = pool.imap(session.get_chart_download, cids)
+	else:
+		info_iterator = map(session.get_chart_download, cids)
+	
 	i = start - 1
-	for info in map(session.get_chart_download, cids):
+	for info in info_iterator:
 		i += 1
 		
+		print(i)
 		chart = chart_list[i]
 		cid = chart["id"]
 		print()
