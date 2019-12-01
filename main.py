@@ -127,7 +127,7 @@ def get_chart_list(mode, status):
 """
 Account 1:
 Name=scraper-bot
-E-Mail=kangalioo654@gmail.com
+E-Mail=<my gmail>
 Pass=scraper-bot
 Hash=53a1dbcbaa38fce050b8f90263b28631
 
@@ -151,8 +151,7 @@ def main():
 	#session = AndroidSession.login("scraper-bot", "53a1dbcbaa38fce050b8f90263b28631")
 	session = AndroidSession("259089", "1868dd6ea073c6501f183b5ea05a48b3")
 	charts = cached(lambda: get_chart_list(0, 0), "chartlist.json", force=False)
-	broken = [45571, 39813, 45574, 45577, 6282, 6281, 26640, 10267, 45599, 44064, 32032, 37027, 40612, 7973, 32164, 6312, 6313, 6314, 6315, 41518, 6831, 7986, 2994, 2996, 2995, 37816, 36158, 5822, 1214, 1217, 1216, 1215, 6723, 27973, 47566, 32592, 8913, 8914, 8915, 8916, 39124, 35027, 6361, 48608, 48994, 8933, 40040, 39147, 27117, 26351, 44017, 46706, 44018, 39286, 45559]
-	scraping.download_everything(session, charts, broken, start=0)
+	scraping.download_everything(session, charts, None, start=0)
 	exit()
 	
 	gamemode = chooser("Which game mode do you want to download?", [
@@ -204,7 +203,7 @@ if __name__ == "__main__":
 	
 	try:
 		main()
-	except:
+	except Exception:
 		logger.exception("Error in main!")
 		print()
 		input("Press enter to quit/close")

@@ -1,12 +1,40 @@
-import shutil, hashlib, gzip, os
+import shutil, hashlib, gzip, os, json
 from zipfile import ZipFile, BadZipFile
 from multiprocessing import Pool
 import requests
 from util import *
 
-USE_POOL = False
+USE_POOL = True
+
+class HashMismatchAfterUnzip(Panic):
+	pass
+
+class Http404(Panic):
+	pass
+
+class CantHashMatch(Panic):
+	pass
+
+# https://gist.github.com/hideaki-t/c42a16189dd5f88a955d
+# (Slightly modified)
+def unzip(path, output_dir, encoding, verbose=False):
+	import sys
+	from pathlib import Path
+	
+	with ZipFile(path) as z:
+		for i in z.namelist():
+			n = os.path.join(output_dir, i.encode('cp437').decode(encoding))
+			if verbose:
+				print(n)
+			if i[-1] == '/':
+				if not n.exists():
+					n.mkdir()
+			else:
+				with open(n, 'wb') as w:
+					w.write(z.read(i))
 
 def download(url, output_path):
+	# ~ print("Downloading " + url)
 	def try_download():
 		# ~ from urllib.request import urlretrieve
 		# ~ urlretrieve(url, output_path)
@@ -18,7 +46,7 @@ def download(url, output_path):
 					# ~ f.write(chunk)
 		with requests.get(url, timeout=2) as r:
 			if r.status_code == 404:
-				raise Panic(f"404: {url}")
+				raise Http404(f"404: {url}")
 			with open(output_path, 'wb') as f:
 				f.write(r.content)
 	
@@ -28,7 +56,7 @@ def download(url, output_path):
 		if os.path.exists(output_path):
 			print("Deleting incomplete download")
 			os.remove(output_path)
-		raise Panic(url) from e
+		raise e
 
 # Returns if the path matches the given md5 hash
 def hash_match(path, md5):
@@ -38,23 +66,11 @@ def hash_match(path, md5):
 # Unzips and removes zip afterwards
 def try_unzip(zip_path):
 	try:
-		with ZipFile(zip_path, "r") as zip_obj:
-			zip_obj.extractall(os.path.dirname(zip_path))
+		unzip(zip_path, os.path.dirname(zip_path), "UTF-8")
 		os.remove(zip_path)
 		return True
 	except BadZipFile:
 		return False
-
-# ~ # Ungzip, remove original file afterwards
-# ~ def try_ungzip(src, dst):
-	# ~ try:
-		# ~ with gzip.open(src, 'rb') as f_in:
-			# ~ with open(dst, 'wb') as f_out:
-				# ~ shutil.copyfileobj(f_in, f_out)
-		# ~ os.remove(src)
-		# ~ return True
-	# ~ except OSError:
-		# ~ return False
 
 # Returns whether unzipping made the hash match
 # Throws exception when it can't cope with the situation anymore.
@@ -72,19 +88,22 @@ def try_to_match_hash(output_path, temp_path, md5):
 		if hash_match(output_path, md5):
 			return True
 		else:
-			raise Panic("Hash mismatch (or file is missing) after unzip")
-	
-	# ~ # Maybe file is meant to be un-gzipped
-	# ~ if try_ungzip(temp_path, output_path):
-		# ~ # If hash matches uncompressed file, fine
-		# ~ if hash_match(output_path, md5):
-			# ~ return True
-		# ~ else:
-			# ~ raise Panic("Hash mismatch after un-gzip")
+			if output_path.endswith(".mc"):
+				try:
+					f = open(output_path)
+					json.load(f)
+					f.close()
+					# If we got to this point, the hash mismatch is a false alarm
+					print(f"{output_path} doesn't hash-match, but it's valid json and stuff so it's prbly fine")
+					return True
+				except Exception:
+					logger.exception(f"{output_path} doesn't hash-match and isn't valid json either")
+					pass
+			raise HashMismatchAfterUnzip("Hash mismatch (or file is missing) after unzip")
 	
 	return False
 
-def download_file(info, target_dir, sid, dsid):
+def download_file(info, target_dir, sid, dsid, song_uid):
 	# Path to place the final file in
 	output_path = os.path.join(target_dir, info["name"])
 	# Construct a temporary file path to use
@@ -100,15 +119,16 @@ def download_file(info, target_dir, sid, dsid):
 		# The file doesn't match in any way, so redownload it is
 	
 	# Download the file
-	url = f"http://chart.malody.cn/{dsid}/0/{info['file']}"
+	url = f"http://chart.malody.cn/{dsid}/{song_uid}/{info['file']}"
 	print(f"Downloading {info['name']}...")
 	try:
 		download(url, output_path)
-	except Panic as e:
+	except Http404 as e:
 		if int(dsid) == 0:
 			# Sometimes download breaks with dsid=0. Maybe, just maybe,
 			# in those cases the normal sid might work?
-			url = f"http://chart.malody.cn/{sid}/0/{info['file']}"
+			print("404 with dsid=0, trying sid in place of dsid..")
+			url = f"http://chart.malody.cn/{sid}/{song_uid}/{info['file']}"
 			download(url, output_path)
 		else:
 			raise e
@@ -120,24 +140,33 @@ def download_file(info, target_dir, sid, dsid):
 	# the server hash was wrong, put the tempfile into the correct
 	# location so it can still function.
 	os.rename(temp_path, output_path)
-	raise Panic(f"{output_path} can't be hash-matched: {url}")
+	raise CantHashMatch(f"{output_path} can't be hash-matched: {url}")
 
 # IMPORTANT!!!!!!!
 # For the download url we _need_ to use the *dsid*!!
 # For output dir the sid is used!
 def download_chart(info):
 	info = info["data"]
+	# ~ print(info)
+	print(f"SID={info['sid']}, DSID={info['dsid']}")
 	target_dir = f"output/_song_{info['sid']}/{info['cid']}"
 	os.makedirs(target_dir, exist_ok=True)
 	
 	for fileinfo in info["list"]:
 		try:
-			download = lambda: download_file(fileinfo, target_dir, info["sid"], info["dsid"])
+			def download():
+				try:
+					download_file(fileinfo, target_dir, info["sid"], info["dsid"], info["uid"])
+				except CantHashMatch as e:
+					if ".jpg" in fileinfo["name"] or ".png" in fileinfo["name"]:
+						print("Image doesn't hash-match. Prbly nothing to worry about")
+					else:
+						raise e
 			# Sometimes the download corrupts I think and the hash
 			# doesn't match. Just try again for that case
 			retry(download, 3, verbose=True)
 		except Panic as e:
-			print(f"Panic in {target_dir}: {e}")
+			logger.exception(target_dir)
 	
 
 def download_everything(session, chart_list, cid_filter=None, start=0):
@@ -168,7 +197,6 @@ def download_everything(session, chart_list, cid_filter=None, start=0):
 	for info in info_iterator:
 		i += 1
 		
-		print(i)
 		chart = chart_list[i]
 		cid = chart["id"]
 		print()

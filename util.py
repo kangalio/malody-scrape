@@ -6,6 +6,9 @@ class Panic(Exception):
 	def __init__(self, text):
 		super().__init__(f"\x1B[1;31m{text}\x1B[0m")
 
+class RetryUnsuccessful(Panic):
+	pass
+
 def cached(fn, cache_path, force = False):
 	if os.path.exists(cache_path) and not force:
 		return json.load(open(cache_path))
@@ -22,10 +25,12 @@ def retry(fn, tries, verbose=True):
 			result = (fn)()
 			if i > 0 and verbose: print(f"Success on attempt {i+1}!")
 			return result
+		except Panic as e:
+			raise e
 		except Exception as e:
 			last_exception = e
 	
-	raise Panic(f"[All {tries} attempts failed] {str(last_exception)}")
+	raise RetryUnsuccessful(f"[All {tries} attempts failed]") from last_exception
 
 def chooser(question, options):
 	print(question)
