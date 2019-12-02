@@ -147,13 +147,6 @@ def main():
 	GAMEMODES = ["Key", "Catch", "Pad", "Taiko", "Ring", "Slide"]
 	STABILITIES = ["Alpha", "Beta", "Stable"]
 	
-	# REMEMBER
-	#session = AndroidSession.login("scraper-bot", "53a1dbcbaa38fce050b8f90263b28631")
-	session = AndroidSession("259089", "1868dd6ea073c6501f183b5ea05a48b3")
-	charts = cached(lambda: get_chart_list(0, 0), "chartlist.json", force=False)
-	scraping.download_everything(session, charts, None, start=0)
-	exit()
-	
 	gamemode = chooser("Which game mode do you want to download?", [
 		"All of them", *GAMEMODES
 	])
@@ -187,7 +180,7 @@ def main():
 	
 	if mode == 0:
 		print("Downloading the main files...")
-		download_everything(session, charts, start=start)
+		scraping.download_everything(session, charts, start=start)
 	elif mode == 1:
 		with open("faulty-charts.json", "r") as f:
 			faulty_cids = json.load(f)
