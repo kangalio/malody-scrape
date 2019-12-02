@@ -119,16 +119,17 @@ def download_file(info, target_dir, sid, dsid, song_uid):
 		# The file doesn't match in any way, so redownload it is
 	
 	# Download the file
-	url = f"http://chart.malody.cn/{dsid}/{song_uid}/{info['file']}"
+	url = f"http://chart.malody.cn/{dsid or sid}/{song_uid}/{info['file']}"
 	print(f"Downloading {info['name']}...")
 	try:
 		download(url, output_path)
 	except Http404 as e:
 		if int(dsid) == 0:
-			# Sometimes download breaks with dsid=0. Maybe, just maybe,
-			# in those cases the normal sid might work?
+			# Sometimes download breaks when dsid=0 and sid was chosen
+			# instead. Maybe, just maybe, in those cases the normal dsid
+			# might work?
 			print("404 with dsid=0, trying sid in place of dsid..")
-			url = f"http://chart.malody.cn/{sid}/{song_uid}/{info['file']}"
+			url = f"http://chart.malody.cn/{dsid}/{song_uid}/{info['file']}"
 			download(url, output_path)
 		else:
 			raise e
