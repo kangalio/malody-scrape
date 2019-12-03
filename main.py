@@ -171,7 +171,7 @@ def main():
 
 	chartlist_file = "chartlist"
 	if gamemode != 0 or stability != 0:
-		chartlist_file += f"-{GAMEMODES[gamemode]}-{STABILITIES[stability]}"
+		chartlist_file += f"-{GAMEMODES[gamemode-1]}-{STABILITIES[stability-1]}"
 	chartlist_file += ".json"
 	
 	print("Fetching chart list...")
